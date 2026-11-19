@@ -3,7 +3,6 @@
 [![arXiv](https://img.shields.io/badge/arXiv-XXXX.XXXXX-b31b1b.svg)](https://arxiv.org/abs/XXXX.XXXXX)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> [!NOTE]
 > **Paper:** [*Agent-guided construction of Feynman integral bases*](https://arxiv.org/abs/XXXX.XXXXX),
 > Pau Petit Rosàs and William J. Torres Bobadilla, arXiv:XXXX.XXXXX.
 > It describes both skills and what they produced for a two-loop five-point family with two masses and for a
