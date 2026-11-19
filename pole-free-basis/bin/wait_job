@@ -1,0 +1,138 @@
+#!/bin/sh
+# wait_job: wait for a reduction job to end, without holding a Wolfram licence slot (plain shell, no kernel).
+#
+# usage: wait_job <job folder> [--timeout S] [--stall S] [--every S] [--match PATTERN]
+#
+# It reads the job's status.m every S seconds (--every, default 30) and prints a line when the status, the phase or
+# the point changes. It ends when the job ends, and never later than --timeout (default 7200 s; 0 = no limit, only
+# with a stall limit), so a wait cannot run forever:
+#
+#   done, learned               exit 0
+#   refused, nonut              exit 1   (the job ran and said no: memory, masters the system lacks)
+#   failed, killed, not running exit 3   (killed: status "running" but its process is gone: bin/ws stopped it at the
+#                                         job's time or memory limit (the message quotes it), the out-of-memory killer,
+#                                         a stop; run its command again, the finished points are kept)
+#   nonut-hosts, loop gone      exit 4   (host sectors were added: run its command again)
+#   timeout, stall              exit 124 (the job goes on; wait again or look at run.log)
+#
+# --stall S stops the wait when run.log has not changed for S seconds while the job runs (default 0: off). Set it
+# from a pilot, a few times the time of one point. A process counts as the job when its command line contains
+# --match followed by a space, a slash or the end of the line (default: "subtree.wls <job folder>", as in the command
+# PFBSubtreeCommand prints; job k374 is not job k374w), or when the PID that status.m records is alive. A final
+# status written before the wait began is the previous run's when a process of the job started after it was written
+# (looked for during the first 3 s): the job runs again (the runner writes "running" only once its kernel has
+# started), and the wait goes on; if that run then ends without writing a status, the wait ends with exit 3. A run
+# that wrote its final status just before the wait and is still exiting is not a new run. A job whose status.m
+# names another host cannot be seen from here: only its status, --timeout and --stall end the wait. A jump of the
+# clock between two checks (the machine slept) is reported.
+# The last line of output is the JSON verdict of the skills' core.
+
+[ $# -ge 1 ] || { sed -n '2,27p' "$0"; exit 2; }
+job=$1; shift
+timeout=7200; stall=0; every=30; match=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --timeout) timeout=$2; shift 2 ;;
+    --stall)   stall=$2; shift 2 ;;
+    --every)   every=$2; shift 2 ;;
+    --match)   match=$2; shift 2 ;;
+    *) echo "wait_job: unknown option $1" >&2; exit 2 ;;
+  esac
+done
+[ -d "$job" ] || { echo "wait_job: no job folder $job" >&2; printf '{"tool": "wait_job", "outcome": "usage", "exit": 2, "job": "%s"}\n' "$job"; exit 2; }
+for v in "$timeout" "$stall" "$every"; do
+  case "$v" in ''|*[!0-9]*) echo "wait_job: --timeout, --stall and --every take whole seconds (got $v)" >&2; exit 2 ;; esac
+done
+if [ "$timeout" -eq 0 ] && [ "$stall" -eq 0 ]; then
+  echo "wait_job: --timeout 0 needs a --stall limit, so that the wait ends" >&2; exit 2
+fi
+# the command names the job folder as it was written; symbolic links resolved or not, both spellings count
+joblog=$(cd "$job" && pwd -L); job=$(cd "$job" && pwd -P)
+[ -n "$match" ] || { match="subtree.wls $job"; match2="subtree.wls $joblog"; }
+match2=${match2:-$match}
+
+field() {  # the value of a key of status.m (strings and integers)
+  [ -f "$job/status.m" ] || return 0
+  tr '\n' ' ' < "$job/status.m" | grep -o "\"$1\" -> \"\{0,1\}[^\",|]*" | head -1 | sed "s/\"$1\" -> \"\{0,1\}//"
+}
+running() {  # a process whose command line names the job, started at or after time $1 when it is given (the patterns
+             # go through the environment, not awk's arguments; a ps without etimes counts any start time)
+  if [ -n "$1" ] && ps -o etimes= -p $$ >/dev/null 2>&1; then fmt="etimes=,args="; else fmt="args="; fi
+  ps -ww -eo "$fmt" 2>/dev/null | WJ_A="$match" WJ_B="$match2" WJ_F="$fmt" WJ_T="${1:-0}" WJ_NOW="$(date +%s)" awk '
+    /wait_job/ { next }
+    { if (ENVIRON["WJ_F"] != "args=") { e = $1; sub(/^[ \t]*[0-9]+[ \t]+/, ""); if (ENVIRON["WJ_NOW"] - e < ENVIRON["WJ_T"] + 0) next }
+      for (k = 1; k <= 2; k++) {
+        m = (k == 1) ? ENVIRON["WJ_A"] : ENVIRON["WJ_B"]; i = index($0, m)
+        if (i > 0) { c = substr($0, i + length(m), 1); if (c == "" || c == " " || c == "/") f = 1 } } }
+    END { exit !f }'
+}
+lower() { tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz'; }
+alive() {  # a job of another host is taken as alive: its processes cannot be seen from here
+  h=$(field Host | lower)
+  if [ -n "$h" ] && [ "$h" != "$(hostname 2>/dev/null | lower)" ] && [ "$h" != "$(hostname -s 2>/dev/null | lower)" ]; then return 0; fi
+  pid=$(field PID)
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then return 0; fi
+  running
+}
+mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
+final() { case "$1" in done|learned|refused|nonut|failed) return 0 ;; esac; return 1; }
+verdict() {  # outcome exit message
+  printf '{"tool": "wait_job", "outcome": "%s", "exit": %s, "job": "%s", "status": "%s", "message": "%s"}\n' "$1" "$2" "$job" "$(field Status)" "$3"
+  exit "$2"
+}
+
+start=$(date +%s); last=$start; seen=""; rerun=""
+while :; do
+  now=$(date +%s)
+  if [ $(( now - last )) -gt $(( 3 * every + 60 )) ]; then
+    echo "wait_job: the clock jumped $(( now - last )) s between two checks: the machine probably slept; the job's timings include that"
+  fi
+  last=$now
+  st=$(field Status); phase=""; point=""; of=""; stale=""
+  # the previous run's final status while the job runs again: a process of the job started after it was written (the
+  # run that wrote it, still exiting, started long before)
+  if final "$st" && [ "$(mtime "$job/status.m")" -lt "$start" ]; then
+    if running "$(mtime "$job/status.m")"; then stale=1; rerun=1
+    elif [ -n "$rerun" ]; then
+      verdict error 3 "the run ended without writing a status (licence, ws or a crash while loading: see run.log); status.m still holds the previous run's $st"
+    elif [ $(( $(date +%s) - start )) -lt 3 ]; then
+      sleep 1; continue   # a command started just before this wait may not show in ps yet
+    fi
+  fi
+  # phase and point only while it runs (a finished status lists every point's record)
+  if [ "$st" = running ]; then phase=$(field Phase); point=$(field Point); of=$(field Of); fi
+  line="$st${phase:+ ($phase}${point:+, point $point of $of}${phase:+)}${stale:+ (left by the previous run: the job runs again)}"
+  if [ "$line" != "$seen" ]; then echo "$(date '+%H:%M:%S') $line"; seen=$line; fi
+  if [ -z "$stale" ]; then
+    case "$st" in
+      done|learned) verdict pass 0 "the job is $st" ;;
+      refused|nonut) verdict fail 1 "$(field Message)" ;;
+      failed) verdict error 3 "$(field Message)" ;;
+    esac
+  fi
+  if ! alive; then
+    sleep 3   # the command loop may be between two rounds, or the runner writing its last status
+    st=$(field Status)
+    case "$st" in
+      done|learned) verdict pass 0 "the job is $st" ;;
+      refused|nonut) verdict fail 1 "$(field Message)" ;;
+      failed) verdict error 3 "$(field Message)" ;;
+      running) alive || { lim=$(grep -v '^[[:space:]]*$' "$job/run.log" 2>/dev/null | tail -3 | grep '^limit: stopped' | tail -1)
+                 if [ -n "$lim" ]; then verdict error 3 "killed: ${lim#limit: }; raise job.m TimeLimit or MaxGB (or bin/ws --set while it runs) and run its command again, the finished points are kept"
+                 else verdict error 3 "killed: status running but its process is gone (the out-of-memory killer, a stop, or a restart); run its command again, the finished points are kept"; fi; } ;;
+      nonut-hosts) alive || verdict rerun 4 "host sectors were added to job.m: run its command again" ;;
+      *) alive || verdict error 3 "not running: no process of the job and no final status (never started, or stopped before writing one)" ;;
+    esac
+  fi
+  if [ "$stall" -gt 0 ]; then
+    # from the later of run.log's last change and the start of this wait (run.log keeps the previous run's lines; a
+    # job that has not started has none)
+    lm=$start; [ -f "$job/run.log" ] && lm=$(mtime "$job/run.log"); [ "$lm" -gt "$start" ] || lm=$start
+    age=$(( now - lm ))
+    [ "$age" -gt "$stall" ] && verdict timeout 124 "no progress in run.log for $age s (limit $stall s); the job goes on"
+  fi
+  if [ "$timeout" -gt 0 ] && [ $(( now - start )) -ge "$timeout" ]; then
+    verdict timeout 124 "still running after $timeout s; the job goes on: wait again, or read run.log"
+  fi
+  sleep "$every"
+done

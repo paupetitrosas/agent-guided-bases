@@ -1,0 +1,7 @@
+#!/bin/sh
+# ws: forwards to the shared licence-slot wrapper core/bin/ws (see its header for the options and exit codes).
+# The core is found through this script's real path, so a skill installed as a symbolic link finds it, or in $SKILL_CORE.
+here=$(cd "$(dirname "$0")" && pwd -P)
+core=${SKILL_CORE:-$here/../../core}
+[ -x "$core/bin/ws" ] || { echo "ws: the shared core was not found next to the skill (set SKILL_CORE to the core folder)" >&2; exit 2; }
+exec "$core/bin/ws" "$@"

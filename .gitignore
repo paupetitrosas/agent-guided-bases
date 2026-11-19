@@ -1,0 +1,9 @@
+# Local test runs and their output: kept on disk, never committed
+smoke/
+
+# Output folders of the skills (maximal-cut-basis: <Name>_analysis, pole-free-basis: <system>_poles)
+*_analysis/
+*_poles/
+
+# Logs that the tools write into the folder they are started from
+*.log

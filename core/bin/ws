@@ -1,0 +1,119 @@
+#!/bin/sh
+# ws: run wolframscript only when the Wolfram licence has a free kernel slot.
+#
+# usage: ws [--free-for N] [--max-wait S] [--limit K] [--timeout T] [--memory GB] script.wls [args ...]
+#        ws [options] -file script.wls [args ...]      (same thing)
+#        ws [options] -code 'Print[1+1]'
+#
+# It counts the main Wolfram kernels running on this machine (every session, subkernels excluded) and waits
+# until fewer than K are running, continuously for N seconds, so that it does not grab the short gap between
+# two jobs of another session. Waiters queue behind a lock, so two of them never take the same slot. stdin is
+# closed (wolframscript reads it otherwise).
+#
+#   --free-for N   the slot must stay free for N seconds before starting (default $MCB_WS_FREE_FOR or 5)
+#   --max-wait S   give up after S seconds of waiting, exit code 75 (default $MCB_WS_MAX_WAIT or 0 = forever)
+#   --limit K      kernel limit (default $MCB_MAX_KERNELS, else the value bin/preflight.wls cached, else 2)
+#
+# Every script runs under a time limit and a memory limit (bin/limit, next to this file): the wall-clock time of the
+# script (the wait for a slot does not count), and the resident memory of its kernel and of everything below it
+# (subkernels, Kira, Fermat), added up. A script that goes over either is stopped with all of it: exit code 124 for
+# the time limit, 137 for the memory limit, after a line on standard error that says which.
+#   --timeout T    the time limit in seconds (default $MCB_TIME_LIMIT, else 86400 = 24 h; 0 = none)
+#   --memory GB    the memory limit (default $MCB_MEMORY_LIMIT, else an equal share of 90% of this machine's memory
+#                  for each licence slot, four shares at most, e.g. 7.2 GB on 16 GB with a limit of 2 kernels;
+#                  0 = none)
+#
+# Running jobs: ws --list shows the jobs started through ws (or bin/limit) on this machine, every session, with
+# their PID, time, memory and limits; ws --set PID --timeout T --memory GB changes the limits of a running job (an
+# agent can give a long job more time, or more memory when the machine has it); ws --stop PID stops one, kernels
+# included. A signal to ws itself (INT, TERM, HUP) does the same: wolframscript and every process below it are
+# stopped (TERM, then KILL after 5 s), since a kernel outlives a signal to wolframscript. Stop only your own jobs.
+#        ws --list
+#        ws --set PID [--timeout T] [--memory GB]
+#        ws --stop PID
+
+free_for=${MCB_WS_FREE_FOR:-5}
+max_wait=${MCB_WS_MAX_WAIT:-0}
+run_timeout=""
+run_memory=""
+cache="${XDG_CACHE_HOME:-$HOME/.cache}/maximal-cut-basis"
+limit=${MCB_MAX_KERNELS:-}
+[ -z "$limit" ] && [ -f "$cache/max_kernels" ] && limit=$(cat "$cache/max_kernels")
+limit=${limit:-2}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --free-for) free_for=$2; shift 2 ;;
+    --max-wait) max_wait=$2; shift 2 ;;
+    --limit)    limit=$2; shift 2 ;;
+    --timeout)  run_timeout=$2; shift 2 ;;
+    --memory)   run_memory=$2; shift 2 ;;
+    *) break ;;
+  esac
+done
+# the jobs themselves run under bin/limit, which keeps the list
+limiter="$(cd "$(dirname "$0")" && pwd -P)/limit"
+case "${1:-}" in
+  --list|--stop|--set) exec "$limiter" "$@" ;;
+esac
+
+[ $# -ge 1 ] || { sed -n '2,32p' "$0"; exit 2; }
+case "$1" in
+  -file|-code|-script|-f|-c) ;;
+  *) set -- -file "$@" ;;
+esac
+
+# (ucomm, the bare name of the executable: on macOS comm is its full path, which has a space for Wolfram Engine)
+running() {
+  ps -eo ucomm=,args= 2>/dev/null | awk '$1 ~ /(WolframKernel|MathKernel)$/ && $0 !~ /-subkernel/' | wc -l | tr -d ' '
+}
+
+# without the cache folder there is no lock to take, and the loop below would wait for it for ever
+mkdir -p "$cache" 2>/dev/null && [ -w "$cache" ] || { echo "ws: cannot write to $cache (the licence queue and the list of jobs are kept there); set XDG_CACHE_HOME to a folder you can write to" >&2; exit 2; }
+lock="$cache/ws.lock"
+start=$(date +%s)
+# the waiter that holds the lock touches it every 2 s, so a lock untouched for 10 minutes belongs to a waiter that died
+while ! mkdir "$lock" 2>/dev/null; do
+  if [ -n "$(find "$lock" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then rmdir "$lock" 2>/dev/null; continue; fi
+  if [ "$max_wait" -gt 0 ] && [ $(( $(date +%s) - start )) -ge "$max_wait" ]; then echo "ws: gave up waiting for the lock" >&2; exit 75; fi
+  sleep 2
+done
+# the lock is removed only while this ws holds it: once released, it may belong to another session's waiter
+have_lock=1
+release_lock() { [ "$have_lock" = 1 ] && rmdir "$lock" 2>/dev/null; have_lock=0; }
+trap 'release_lock' EXIT
+trap 'release_lock; exit 130' INT TERM HUP
+
+free_since=""
+waited=0
+while :; do
+  n=$(running)
+  now=$(date +%s)
+  if [ "$n" -lt "$limit" ]; then
+    [ -z "$free_since" ] && free_since=$now
+    [ $(( now - free_since )) -ge "$free_for" ] && break
+  else
+    free_since=""
+    if [ "$waited" = 0 ]; then echo "ws: $n of $limit Wolfram kernels in use; waiting for a free slot" >&2; waited=1; fi
+  fi
+  if [ "$max_wait" -gt 0 ] && [ $(( now - start )) -ge "$max_wait" ]; then echo "ws: gave up after $max_wait s" >&2; exit 75; fi
+  touch "$lock" 2>/dev/null
+  sleep 2
+done
+
+before=$(running)
+# the limits: given, else bin/limit's defaults (MCB_TIME_LIMIT, MCB_MEMORY_LIMIT, the machine's share)
+set -- ${run_timeout:+--timeout "$run_timeout"} ${run_memory:+--memory "$run_memory"} -- wolframscript "$@"
+"$limiter" "$@" < /dev/null &
+pid=$!
+# from here on a signal stops the job and its kernels (bin/limit stops everything below it); the lock is released
+stopjob() { kill -TERM "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; release_lock; exit "$1"; }
+trap 'release_lock' EXIT
+trap 'stopjob 130' INT HUP
+trap 'stopjob 143' TERM
+# keep the lock until our kernel is visible (or the script is already over), so the next waiter counts it
+i=0
+while [ $i -lt 20 ] && kill -0 "$pid" 2>/dev/null && [ "$(running)" -le "$before" ]; do sleep 1; i=$((i + 1)); done
+release_lock
+wait "$pid"
+exit $?
