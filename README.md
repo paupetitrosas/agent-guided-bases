@@ -1,10 +1,10 @@
 # maximal-cut-basis and pole-free-basis
 
-[![arXiv](https://img.shields.io/badge/arXiv-XXXX.XXXXX-b31b1b.svg)](https://arxiv.org/abs/XXXX.XXXXX)
+[![arXiv](https://img.shields.io/badge/arXiv-2611.26688-b31b1b.svg)](https://arxiv.org/abs/2611.26688)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> **Paper:** [*Agent-guided construction of Feynman integral bases*](https://arxiv.org/abs/XXXX.XXXXX),
-> Pau Petit Rosàs and William J. Torres Bobadilla, arXiv:XXXX.XXXXX.
+> **Paper:** [*Agent-guided construction of Feynman integral bases*](https://arxiv.org/pdf/2611.26688),
+> Pau Petit Rosàs and William J. Torres Bobadilla, arXiv:2611.26688.
 > It describes both skills and what they produced for a two-loop five-point family with two masses and for a
 > two-loop jet-function family. [How to cite it](#citing-and-acknowledging)
 
@@ -294,7 +294,7 @@ If you use the skills, please cite the paper:
 @article{PetitRosas:XXXX,
     author        = "Petit Ros{\`a}s, Pau and Torres Bobadilla, William J.",
     title         = "{Agent-guided construction of Feynman integral bases}",
-    eprint        = "XXXX.XXXXX",
+    eprint        = "2611.26688",
     archivePrefix = "arXiv",
     year          = "2026"
 }
