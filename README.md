@@ -291,12 +291,14 @@ masters.
 If you use the skills, please cite the paper:
 
 ```bibtex
-@article{PetitRosas:XXXX,
-    author        = "Petit Ros{\`a}s, Pau and Torres Bobadilla, William J.",
-    title         = "{Agent-guided construction of Feynman integral bases}",
-    eprint        = "2611.26688",
+@article{PetitRosas:2026qkw,
+    author = "Petit Rosas, Pau and Torres Bobadilla, William J.",
+    title = "{Agent-guided construction of Feynman integral bases}",
+    eprint = "2611.26688",
     archivePrefix = "arXiv",
-    year          = "2026"
+    primaryClass = "hep-ph",
+    month = "11",
+    year = "2026"
 }
 ```
 
